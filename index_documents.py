@@ -360,6 +360,14 @@ def chunk_text_by_paragraphs(
     )
 
 
+def resolve_fallback_chunk_overlap(chunk_size: int) -> int:
+    """Clamp fallback overlap so fixed fallback remains valid for any chunk size."""
+
+    if chunk_size <= 1:
+        return 0
+    return min(DEFAULT_CHUNK_OVERLAP, chunk_size - 1)
+
+
 def _group_text_units_with_fallback(
     text_units: list[str],
     chunk_size: int,
@@ -388,7 +396,7 @@ def _group_text_units_with_fallback(
                 chunk_text_fixed(
                     text_unit,
                     chunk_size=chunk_size,
-                    chunk_overlap=DEFAULT_CHUNK_OVERLAP,
+                    chunk_overlap=resolve_fallback_chunk_overlap(chunk_size),
                     encoding_name=encoding_name,
                 )
             )
