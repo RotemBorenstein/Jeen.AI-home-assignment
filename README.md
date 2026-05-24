@@ -11,7 +11,7 @@ For each run, the script:
 - generates one Gemini embedding per chunk
 - stores chunk text and embeddings in PostgreSQL
 
-The project is intentionally small and explicit. The main code lives in one script:
+The main code lives in one script:
 - `index_documents.py`
 
 ## Installation
@@ -44,6 +44,12 @@ Optional variable:
 If `GEMINI_EMBEDDING_MODEL` is not set, the code uses:
 - `gemini-embedding-001`
 
+`POSTGRES_URL` format:
+
+```env
+POSTGRES_URL=postgresql://username:password@localhost:5432/database_name
+```
+
 ## Database Setup
 
 The database schema is defined in:
@@ -54,6 +60,8 @@ Apply it with a PostgreSQL client before running the script. Example with `psql`
 ```bash
 psql "postgresql://username:password@localhost:5432/your_database" -f schema.sql
 ```
+
+If the table was not created yet, the script now fails before any Gemini embedding calls with a clear schema error.
 
 The table stores these columns:
 - `id`: row identifier
@@ -137,8 +145,8 @@ The script runs in this order:
 4. extract text
 5. clean the extracted text
 6. split text into chunks
-7. generate embeddings for all chunks
-8. connect to PostgreSQL
+7. connect to PostgreSQL and verify the required table exists
+8. generate embeddings for all chunks
 9. optionally delete old rows for the same filename and strategy
 10. insert all rows in one transaction
 11. commit once at the end
@@ -149,10 +157,6 @@ Progress messages are printed for the major phases, followed by a final success 
 - `chunk_count`
 - `inserted_row_count`
 
-## Running Tests
 
-Run the full test suite with:
 
-```bash
-python -m unittest discover -s tests -v
-```
+

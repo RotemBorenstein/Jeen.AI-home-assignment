@@ -25,6 +25,18 @@ DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 64
 DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
 DEFAULT_TIKTOKEN_ENCODING = "cl100k_base"
+CL100K_BASE_FILE_PATH = Path(__file__).resolve().parent / "vendor" / "cl100k_base.tiktoken"
+CL100K_BASE_EXPECTED_HASH = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+CL100K_BASE_PATTERN = (
+    r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}++|\p{N}{1,3}+| ?[^\s\p{L}\p{N}]++[\r\n]*+|\s++$|\s*[\r\n]|\s+(?!\S)|\s"""
+)
+CL100K_BASE_SPECIAL_TOKENS = {
+    "<|endoftext|>": 100257,
+    "<|fim_prefix|>": 100258,
+    "<|fim_middle|>": 100259,
+    "<|fim_suffix|>": 100260,
+    "<|endofprompt|>": 100276,
+}
 SUPPORTED_EXTENSIONS = {".pdf", ".docx"}
 SPLIT_STRATEGIES = ("fixed", "sentence", "paragraph")
 
@@ -201,7 +213,92 @@ def extract_docx_text(file_path: Path) -> str:
     except Exception as error:
         raise ExtractionError(f"Failed to parse DOCX file '{file_path}': {error}") from error
 
-    return "\n".join(paragraph.text for paragraph in document.paragraphs)
+    paragraph_texts = [paragraph.text for paragraph in document.paragraphs if paragraph.text != ""]
+    return "\n\n".join(paragraph_texts)
+
+
+def normalize_pdf_page_text(page_text: str) -> str:
+    """Merge wrapped PDF lines into cleaner paragraph text for downstream chunking."""
+
+    normalized_text = page_text.replace("\r\n", "\n").replace("\r", "\n")
+    raw_lines = normalized_text.split("\n")
+
+    paragraphs: list[str] = []
+    current_parts: list[str] = []
+
+    def flush_current_parts() -> None:
+        if current_parts:
+            paragraphs.append(" ".join(current_parts))
+            current_parts.clear()
+
+    for line_index, raw_line in enumerate(raw_lines):
+        line = re.sub(r"[ \t]{2,}", " ", raw_line).strip()
+
+        if not line:
+            flush_current_parts()
+            continue
+
+        next_non_empty_line = get_next_non_empty_pdf_line(raw_lines, line_index + 1)
+        if is_pdf_heading_line(line, next_non_empty_line=next_non_empty_line):
+            flush_current_parts()
+            paragraphs.append(line)
+            continue
+
+        if line.startswith("•"):
+            flush_current_parts()
+            current_parts.append(line)
+            continue
+
+        if current_parts and should_merge_pdf_without_space(current_parts[-1], line):
+            if current_parts[-1].endswith(" -"):
+                current_parts[-1] = current_parts[-1][:-2] + "-" + line
+            else:
+                current_parts[-1] = current_parts[-1].rstrip() + line
+            continue
+
+        current_parts.append(line)
+
+    flush_current_parts()
+    return "\n\n".join(paragraphs)
+
+
+def get_next_non_empty_pdf_line(raw_lines: list[str], start_index: int) -> str | None:
+    """Return the next non-empty PDF line after the current line, if one exists."""
+
+    for raw_line in raw_lines[start_index:]:
+        normalized_line = re.sub(r"[ \t]{2,}", " ", raw_line).strip()
+        if normalized_line:
+            return normalized_line
+    return None
+
+
+def is_pdf_heading_line(line: str, next_non_empty_line: str | None = None) -> bool:
+    """Detect short section-title lines that should remain standalone paragraphs."""
+
+    if len(line) > 80:
+        return False
+    if line.startswith("•"):
+        return False
+    if re.search(r"[.!?;:]$", line):
+        return False
+
+    words = line.split()
+    if not words or len(words) > 4:
+        return False
+
+    if not re.match(r"^[A-Z]", words[0]):
+        return False
+
+    if next_non_empty_line and next_non_empty_line[:1].islower():
+        return False
+
+    return all(re.match(r"^[A-Za-z0-9'&()-]+$", word) for word in words)
+
+
+def should_merge_pdf_without_space(previous_text: str, next_line: str) -> bool:
+    """Rejoin a PDF line-wrap split that broke a hyphenated word across lines."""
+
+    return previous_text.endswith("-") or previous_text.endswith(" -")
 
 
 def extract_pdf_text(file_path: Path) -> str:
@@ -214,7 +311,7 @@ def extract_pdf_text(file_path: Path) -> str:
         page_texts = []
         for page in reader.pages:
             page_text = page.extract_text()
-            page_texts.append(page_text or "")
+            page_texts.append(normalize_pdf_page_text(page_text or ""))
     except Exception as error:
         raise ExtractionError(f"Failed to parse PDF file '{file_path}': {error}") from error
 
@@ -248,12 +345,33 @@ def clean_extracted_text(text: str) -> str:
 
 
 @lru_cache(maxsize=None)
+def load_local_cl100k_base_encoding():
+    """Build the vendored cl100k_base encoding from the local repository file."""
+
+    import tiktoken
+    import tiktoken.load
+
+    mergeable_ranks = tiktoken.load.load_tiktoken_bpe(
+        str(CL100K_BASE_FILE_PATH),
+        expected_hash=CL100K_BASE_EXPECTED_HASH,
+    )
+    return tiktoken.Encoding(
+        name=DEFAULT_TIKTOKEN_ENCODING,
+        pat_str=CL100K_BASE_PATTERN,
+        mergeable_ranks=mergeable_ranks,
+        special_tokens=CL100K_BASE_SPECIAL_TOKENS,
+    )
+
+
+@lru_cache(maxsize=None)
 def get_token_encoding(encoding_name: str = DEFAULT_TIKTOKEN_ENCODING):
     """Load and cache the configured tiktoken encoding."""
 
     import tiktoken
 
     try:
+        if encoding_name == DEFAULT_TIKTOKEN_ENCODING:
+            return load_local_cl100k_base_encoding()
         return tiktoken.get_encoding(encoding_name)
     except Exception as error:
         raise TokenizationError(
@@ -550,6 +668,19 @@ def connect_to_postgres(postgres_url: str):
         raise DatabaseError(f"Failed to connect to PostgreSQL: {error}") from error
 
 
+def validate_database_schema(connection) -> None:
+    """Fail early if the required table is missing from the target database."""
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM document_chunks LIMIT 1")
+    except Exception as error:
+        raise DatabaseError(
+            "PostgreSQL is reachable, but the required table 'document_chunks' is missing. "
+            "Apply schema.sql to the configured database before running the indexer."
+        ) from error
+
+
 def delete_existing_rows(connection, filename: str, split_strategy: str) -> None:
     """Delete rows for one filename and split strategy."""
 
@@ -665,17 +796,20 @@ def run_indexing_pipeline(
         chunk_overlap=args.chunk_overlap,
     )
 
-    progress_printer("Generating embeddings...")
-    gemini_client = create_gemini_client(settings.gemini_api_key)
-    chunk_records = generate_embeddings_for_chunks(
-        chunks,
-        client=gemini_client,
-        model_name=settings.gemini_embedding_model,
-    )
-
-    progress_printer("Writing rows to PostgreSQL...")
+    progress_printer("Validating PostgreSQL setup...")
     connection = connect_to_postgres(settings.postgres_url)
     try:
+        validate_database_schema(connection)
+
+        progress_printer("Generating embeddings...")
+        gemini_client = create_gemini_client(settings.gemini_api_key)
+        chunk_records = generate_embeddings_for_chunks(
+            chunks,
+            client=gemini_client,
+            model_name=settings.gemini_embedding_model,
+        )
+
+        progress_printer("Writing rows to PostgreSQL...")
         insertion_summary = run_replace_and_insert(
             connection=connection,
             filename=input_file.filename,
