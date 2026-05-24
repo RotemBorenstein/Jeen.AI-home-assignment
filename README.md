@@ -61,6 +61,8 @@ Apply it with a PostgreSQL client before running the script. Example with `psql`
 psql "postgresql://username:password@localhost:5432/your_database" -f schema.sql
 ```
 
+Apply `schema.sql` using the same PostgreSQL user from `POSTGRES_URL`, or make sure that user has permission to read and write the `document_chunks` table.
+
 If the table was not created yet, the script now fails before any Gemini embedding calls with a clear schema error.
 
 The table stores these columns:
@@ -156,7 +158,3 @@ Progress messages are printed for the major phases, followed by a final success 
 - `split_strategy`
 - `chunk_count`
 - `inserted_row_count`
-
-
-
-
